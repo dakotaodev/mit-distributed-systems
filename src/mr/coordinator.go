@@ -1,18 +1,122 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+)
 
 type Coordinator struct {
 	// Your definitions here.
-
+	mu             sync.Mutex
+	Tasks          map[string]Task
+	NReduce        int
+	MapComplete    bool
+	ReduceComplete bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
+func (c *Coordinator) RequestTask(args *MrArgs, reply *MrReply) error {
+	log.Printf("RequestTask...")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.MapComplete {
+		for i, task := range c.Tasks {
+			if task.Action == Map && task.Status == Pending {
+				task.Status = Running
+				task.LastAssigned = time.Now()
+				reply.Task = task
+				c.Tasks[i] = task
+				return nil
+			}
+			if task.Action == Map && task.Status == Running && time.Since(task.LastAssigned) > time.Second*10 {
+				// reassign
+				task.LastAssigned = time.Now()
+				reply.Task = task
+				c.Tasks[i] = task
+				return nil
+			}
+		}
+		mapStatus := c.allComplete(Map)
+		if mapStatus {
+			c.MapComplete = mapStatus
+		} else {
+			t := Task{
+				Action: Wait,
+			}
+			reply.Task = t
+			return nil
+		}
+	}
+	// no outstanding map tasks. reduce stage..
+	if !c.ReduceComplete {
+		for i, task := range c.Tasks {
+			if task.Action == Reduce && task.Status == Pending {
+				log.Printf("Assigning new reduce task ID: %s", task.ID)
+				task.Status = Running
+				task.LastAssigned = time.Now()
+				reply.Task = task
+				c.Tasks[i] = task
+				return nil
+			}
+			if task.Action == Reduce && task.Status == Running && time.Since(task.LastAssigned) > time.Second*10 {
+				// reassign
+				log.Printf("Reassigning reduce task ID: %s", task.ID)
+				task.LastAssigned = time.Now()
+				reply.Task = task
+				c.Tasks[i] = task
+				return nil
+			}
+		}
+		reduceStatus := c.allComplete(Reduce)
+		if reduceStatus {
+			c.ReduceComplete = reduceStatus
+		} else {
+			t := Task{
+				Action: Wait,
+			}
+			reply.Task = t
+			return nil
+		}
+	}
+
+	// no action to take
+	reply.Task = Task{
+		Action: Exit,
+	}
+	return nil
+}
+
+func (c *Coordinator) allComplete(action Action) bool {
+
+	for _, task := range c.Tasks {
+		if task.Action == action && task.Status != Complete {
+			return false
+		}
+	}
+	return true
+
+}
+func (c *Coordinator) UpdateTask(args *MrArgs, reply *MrReply) error {
+	log.Printf("UpdateTask... %v", args.Task)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := args.Task.ID
+
+	if task, ok := c.Tasks[id]; ok {
+		task.Status = args.Task.Status
+		c.Tasks[id] = task
+		log.Printf("updated with %v", task)
+	}
+
+	return nil
+}
 
 // an example RPC handler.
 //
@@ -21,7 +125,6 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server(sockname string) {
@@ -38,10 +141,15 @@ func (c *Coordinator) server(sockname string) {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ret := false
 
 	// Your code here.
-
+	if c.MapComplete && c.ReduceComplete {
+		return true
+	}
 
 	return ret
 }
@@ -53,7 +161,29 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 	c := Coordinator{}
 
 	// Your code here.
+	c.NReduce = nReduce
+	c.Tasks = make(map[string]Task)
+	for i, f := range files {
+		t := Task{
+			ID:       strconv.Itoa(i),
+			Filename: f,
+			Action:   Map,
+			Status:   Pending,
+			NReduce:  nReduce,
+		}
+		c.Tasks[strconv.Itoa(i)] = t
+	}
 
+	for i := 0; i < nReduce; i++ {
+		rt := Task{
+			ID:       fmt.Sprintf("reduce-%s", strconv.Itoa(i)),
+			Filename: "",
+			Action:   Reduce,
+			Status:   Pending,
+			NReduce:  nReduce,
+		}
+		c.Tasks[rt.ID] = rt
+	}
 
 	c.server(sockname)
 	return &c
