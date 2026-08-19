@@ -27,61 +27,32 @@ func (c *Coordinator) RequestTask(args *MrArgs, reply *MrReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.MapComplete {
-		for i, task := range c.Tasks {
-			if task.Action == Map && task.Status == Pending {
-				task.Status = Running
-				task.LastAssigned = time.Now()
-				reply.Task = task
-				c.Tasks[i] = task
-				return nil
+		found := c.assignTask(Map, args, reply)
+		if !found {
+			c.MapComplete = c.allComplete(Map)
+			if !c.MapComplete {
+				t := Task{
+					Action: Wait,
+				}
+				reply.Task = t
+				return nil	
 			}
-			if task.Action == Map && task.Status == Running && time.Since(task.LastAssigned) > time.Second*10 {
-				// reassign
-				task.LastAssigned = time.Now()
-				reply.Task = task
-				c.Tasks[i] = task
-				return nil
-			}
-		}
-		mapStatus := c.allComplete(Map)
-		if mapStatus {
-			c.MapComplete = mapStatus
 		} else {
-			t := Task{
-				Action: Wait,
-			}
-			reply.Task = t
 			return nil
 		}
 	}
-	// no outstanding map tasks. reduce stage..
 	if !c.ReduceComplete {
-		for i, task := range c.Tasks {
-			if task.Action == Reduce && task.Status == Pending {
-				log.Printf("Assigning new reduce task ID: %s", task.ID)
-				task.Status = Running
-				task.LastAssigned = time.Now()
-				reply.Task = task
-				c.Tasks[i] = task
-				return nil
+		found := c.assignTask(Reduce, args, reply)
+		if !found {
+			c.ReduceComplete = c.allComplete(Reduce)
+			if !c.ReduceComplete {
+				t := Task{
+					Action: Wait,
+				}
+				reply.Task = t
+				return nil	
 			}
-			if task.Action == Reduce && task.Status == Running && time.Since(task.LastAssigned) > time.Second*10 {
-				// reassign
-				log.Printf("Reassigning reduce task ID: %s", task.ID)
-				task.LastAssigned = time.Now()
-				reply.Task = task
-				c.Tasks[i] = task
-				return nil
-			}
-		}
-		reduceStatus := c.allComplete(Reduce)
-		if reduceStatus {
-			c.ReduceComplete = reduceStatus
 		} else {
-			t := Task{
-				Action: Wait,
-			}
-			reply.Task = t
 			return nil
 		}
 	}
@@ -92,6 +63,28 @@ func (c *Coordinator) RequestTask(args *MrArgs, reply *MrReply) error {
 	}
 	return nil
 }
+
+func (c *Coordinator) assignTask(action Action, args *MrArgs, reply *MrReply) bool {
+			for i, task := range c.Tasks {
+			if task.Action == action && task.Status == Pending {
+				task.Status = Running
+				task.LastAssigned = time.Now()
+				reply.Task = task
+				c.Tasks[i] = task
+				return true 
+			}
+			if task.Action == action && task.Status == Running && time.Since(task.LastAssigned) > time.Second*10 {
+				// reassign
+				task.LastAssigned = time.Now()
+				reply.Task = task
+				c.Tasks[i] = task
+				return true
+			}
+		}
+		return false
+}
+
+
 
 func (c *Coordinator) allComplete(action Action) bool {
 
